@@ -1,7 +1,6 @@
 name: Build Injected IPA
 
 on:
-  workflow_dispatch:
   push:
     branches: [ main ]
 
@@ -16,62 +15,31 @@ jobs:
     - name: Build Tweak
       run: |
         SDK_PATH=$(xcrun --sdk iphoneos --show-sdk-path 2>/dev/null)
-        if [ -z "$SDK_PATH" ]; then
-          SDK_PATH="/Applications/Xcode.app/Contents/Developer/Platforms/iPhoneOS.platform/Developer/SDKs/iPhoneOS.sdk"
-        fi
         clang -target arm64-apple-ios14.0 -isysroot "$SDK_PATH" -fobjc-arc -dynamiclib \
           -O2 -o XingxinShare.dylib hook_dylib.m \
-          -framework UIKit -framework Foundation -lobjc \
-          -Wl,-dylib_install_name,@executable_path/XingxinShare.dylib \
-          -Wl,-ios_version_min,14.0
+          -framework UIKit -framework Foundation \
+          -Wl,-dylib_install_name,@executable_path/XingxinShare.dylib
         echo "DYLIB_PATH=$(pwd)/XingxinShare.dylib" >> $GITHUB_ENV
     
     - name: Download IPA
       run: |
-        curl -L "https://github.com/mvpbaggio/xingxin-share/releases/download/v1/xingxin.ipa" \
-          -o /tmp/xingxin.ipa -w "HTTP %{http_code}, Size: %{size_download}\n"
+        curl -L -o /tmp/xingxin.ipa \
+          https://github.com/mvpbaggio/xingxin-share/releases/download/v1/xingxin.ipa
     
-    - name: Inject into IPA
+    - name: Inject
       run: |
-        mkdir -p /tmp/extract
-        cd /tmp/extract
-        unzip -q /tmp/xingxin.ipa -d extracted/
-        APP_PATH=$(find extracted -name "*.app" -type d | head -1)
-        
-        # 找主二进制
-        for n in wework wework64 app App; do
-          [ -f "$APP_PATH/$n" ] && MACHO="$APP_PATH/$n" && break
-        done
-        if [ -z "$MACHO" ]; then
-          for f in "$APP_PATH"/*; do
-            FTYPE=$(file -b "$f" 2>/dev/null)
-            echo "$FTYPE" | grep -q "arm64" && MACHO="$f" && break
-          done
-        fi
-        echo "Binary: $(basename $MACHO)"
-        
-        # 复制dylib
-        cp "$DYLIB_PATH" "$APP_PATH/"
-        
-        # 用Python注入LC_LOAD_DYLIB
-        python3 -c "
-import struct
-with open('$MACHO','rb') as f: d=bytearray(f.read())
-(_,_,_,_,n,s,_,_)=struct.unpack_from('<IIIIIIII',d[0:32])
-n2=b'@executable_path/XingxinShare.dylib\x00'+b'\x00'*3
-c=struct.pack('<II',0xc,24+len(n2))+struct.pack('<III',24,0x01000000,0x01000000)+n2
-p=32+s;nd=d[:p]+c+d[p:]
-v=list(struct.unpack_from('<IIIIIIII',d[0:32]));v[4]+=1;v[5]+=len(c)
-nd[0:32]=struct.pack('<IIIIIIII',*v)
-with open('$MACHO','wb') as f: f.write(nd)
-print(f'Injected: ncmds {n} -> {n+1}')
-"
-        chmod +x "$MACHO"
-        rm -rf "$APP_PATH/_CodeSignature" "$APP_PATH/embedded.mobileprovision" "$APP_PATH/archived-expanded-entitlements.xcent"
-        cd /tmp/extract/extracted
+        mkdir -p /tmp/x
+        cd /tmp/x
+        unzip -q /tmp/xingxin.ipa -d out/
+        APP=$(find out -name "*.app" -type d | head -1)
+        BIN=$(find "$APP" -maxdepth 1 -type f | head -1)
+        cp $DYLIB_PATH "$APP/"
+        python3 $GITHUB_WORKSPACE/inject_macho.py "$BIN"
+        rm -rf "$APP/_CodeSignature" "$APP/embedded.mobileprovision"
+        cd /tmp/x/out
         zip -qr /tmp/行信_带分享.ipa Payload/
     
-    - name: Upload IPA
+    - name: Upload
       uses: actions/upload-artifact@v4
       with:
         name: 行信_带分享
