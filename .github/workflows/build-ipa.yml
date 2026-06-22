@@ -13,33 +13,21 @@ jobs:
     - name: Checkout
       uses: actions/checkout@v4
     
-    - name: Setup theos
-      run: |
-        git clone --recursive --depth 1 https://github.com/theos/theos.git /tmp/theos
-        echo "THEOS=/tmp/theos" >> $GITHUB_ENV
-    
     - name: Build Tweak
       run: |
-        export THEOS=/tmp/theos
-        export TARGET=iphone:17.0:14.0
-        make clean || true
-        make package || true
-        # 也尝试直接clang编译
-        DYLIB=$(find . -name "*.dylib" | head -1)
-        if [ -z "$DYLIB" ]; then
-          SDK_PATH=$(xcrun --sdk iphoneos --show-sdk-path 2>/dev/null)
-          if [ -z "$SDK_PATH" ]; then
-            SDK_PATH="/Applications/Xcode.app/Contents/Developer/Platforms/iPhoneOS.platform/Developer/SDKs/iPhoneOS.sdk"
-          fi
-          echo "SDK: $SDK_PATH"
-          clang -target arm64-apple-ios14.0 -isysroot "$SDK_PATH" -fobjc-arc -dynamiclib \
-            -O2 -o XingxinShare.dylib hook_dylib.m \
-            -framework UIKit -framework Foundation -lobjc \
-            -Wl,-dylib_install_name,@executable_path/XingxinShare.dylib \
-            -Wl,-ios_version_min,14.0
-          DYLIB=XingxinShare.dylib
+        set +e
+        SDK_PATH=$(xcrun --sdk iphoneos --show-sdk-path 2>/dev/null)
+        if [ -z "$SDK_PATH" ]; then
+          SDK_PATH="/Applications/Xcode.app/Contents/Developer/Platforms/iPhoneOS.platform/Developer/SDKs/iPhoneOS.sdk"
         fi
-        echo "DYLIB_PATH=$(pwd)/$DYLIB" >> $GITHUB_ENV
+        echo "SDK: $SDK_PATH"
+        clang -target arm64-apple-ios14.0 -isysroot "$SDK_PATH" -fobjc-arc -dynamiclib \
+          -O2 -o XingxinShare.dylib hook_dylib.m \
+          -framework UIKit -framework Foundation -lobjc \
+          -Wl,-dylib_install_name,@executable_path/XingxinShare.dylib \
+          -Wl,-ios_version_min,14.0
+        echo "DYLIB_PATH=$(pwd)/XingxinShare.dylib" >> $GITHUB_ENV
+        ls -lh XingxinShare.dylib
     
     - name: Download IPA
       run: |
