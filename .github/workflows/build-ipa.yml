@@ -19,7 +19,7 @@ jobs:
           -O2 -o XingxinShare.dylib hook_dylib.m \
           -framework UIKit -framework Foundation \
           -Wl,-dylib_install_name,@executable_path/XingxinShare.dylib
-        echo "DYLIB_PATH=$(pwd)/XingxinShare.dylib" >> $GITHUB_ENV
+        echo "DYLIB=$(pwd)/XingxinShare.dylib" >> $GITHUB_ENV
     
     - name: Download IPA
       run: |
@@ -32,9 +32,133 @@ jobs:
         cd /tmp/x
         unzip -q /tmp/xingxin.ipa -d out/
         APP=$(find out -name "*.app" -type d | head -1)
-        BIN="$APP/wework"
-        cp $DYLIB_PATH "$APP/"
-        python3 $GITHUB_WORKSPACE/inject_macho.py "$BIN"
+        cp "$DYLIB" "$APP/"
+        
+        python3 << 'PYEOF'
+import os, struct
+
+macho = "/tmp/x/out/Payload/wework.app/wework"
+with open(macho, 'rb') as f:
+    data = bytearray(f.read())
+
+def r(off, fmt='I'):
+    return struct.unpack_from('<' + fmt, data[off:off+struct.calcsize('<' + fmt)])[0]
+
+def w(off, val, fmt='I'):
+    struct.pack_into('<' + fmt, data, off, val)
+
+magic = r(0)
+if magic != 0xfeedfacf:
+    print(f"Not arm64 Mach-O: magic=0x{magic:x}")
+    exit(1)
+
+ncmds = r(4, 'I')
+sizeofcmds = r(16, 'I')
+cmds_end = 32 + sizeofcmds
+
+# 找到__TEXT段（第一个有实际数据的段）
+# 遍历load commands找LC_SEGMENT_64
+pos = 32
+first_seg_fileoff = None
+first_seg_cmd_offset = None
+
+while pos < cmds_end:
+    cmd = r(pos, 'I')
+    cmdsize = r(pos+4, 'I')
+    if cmd == 0x19:  # LC_SEGMENT_64
+        segname = data[pos+8:pos+24].split(b'\x00')[0].decode()
+        fileoff = r(pos+0x18, 'Q')
+        if first_seg_fileoff is None and fileoff > 0 and segname != b'__PAGEZERO'.decode():
+            first_seg_fileoff = fileoff
+            first_seg_cmd_offset = pos
+            print(f"First data segment: {segname}, fileoff=0x{fileoff:x}")
+            break
+    pos += cmdsize
+
+if first_seg_fileoff is None:
+    print("No data segment found!")
+    exit(1)
+
+padding = first_seg_fileoff - cmds_end
+print(f"cmds_end=0x{cmds_end:x}, data_start=0x{first_seg_fileoff:x}, padding={padding} bytes")
+
+# 构建dylib command
+dname = b'@executable_path/XingxinShare.dylib\x00'
+while len(dname) % 4 != 0:
+    dname += b'\x00'
+
+cmd_data = struct.pack('<II', 0xc, 24 + len(dname))
+cmd_data += struct.pack('<III', 24, 0x01000000, 0x01000000)
+cmd_data += dname
+
+print(f"dylib command size: {len(cmd_data)} bytes")
+
+if padding >= len(cmd_data):
+    # 方法A: 直接写padding区域，更新sizeofcmds
+    data[cmds_end:cmds_end+len(cmd_data)] = cmd_data
+    w(16, sizeofcmds + len(cmd_data))
+    w(4, ncmds + 1)
+    print(f"[A] Inserted into padding: ncmds {ncmds} -> {ncmds+1}")
+else:
+    # 方法B: 需要移动段数据（用头部重写策略）
+    print(f"[B] Not enough padding! Need {len(cmd_data)}, have {padding}")
+    print("Calculating new layout...")
+    
+    # 读取原始载荷命令的映射
+    pos = 32
+    seg_count = 0
+    next_seg_off = first_seg_fileoff
+    shift = len(cmd_data)
+    
+    while pos < cmds_end:
+        cmd = r(pos, 'I')
+        cmdsize = r(pos+4, 'I')
+        if cmd == 0x19:  # LC_SEGMENT_64
+            segname = data[pos+8:pos+24].split(b'\x00')[0].decode()
+            fileoff = r(pos+0x18, 'Q')
+            filesize = r(pos+0x20, 'Q')
+            nsects = r(pos+0x3C, 'I')
+            if fileoff >= cmds_end:
+                seg_count += 1
+                new_off = fileoff + shift
+                w(pos+0x18, new_off, 'Q')
+                # 更新内部sections
+                sec_pos = pos + 0x48
+                for si in range(nsects):
+                    sec_off = r(sec_pos + 0x20, 'Q')
+                    if sec_off >= cmds_end:
+                        w(sec_pos + 0x20, sec_off + shift, 'Q')
+                    sec_pos += 0x50
+                print(f"  {segname}: fileoff 0x{fileoff:x} -> 0x{new_off:x}")
+        elif cmd == 0x02:  # LC_SYMTAB
+            stroff = r(pos+0x10, 'I')
+            if stroff >= cmds_end:
+                w(pos+0x10, stroff + shift, 'I')
+                print(f"  LC_SYMTAB.stroff: 0x{stroff:x} -> 0x{stroff+shift:x}")
+            strsize = r(pos+0x14, 'I')
+            symoff = r(pos+0x08, 'I')
+            if symoff >= cmds_end:
+                w(pos+0x08, symoff + shift, 'I')
+                print(f"  LC_SYMTAB.symoff: 0x{symoff:x} -> 0x{symoff+shift:x}")
+        elif cmd == 0x0B:  # LC_DYSYMTAB
+            for off_field in [4, 8, 12, 16, 20, 24, 28, 32, 36, 40]:
+                tocoff = r(pos + off_field, 'I')
+                if tocoff >= cmds_end:
+                    w(pos + off_field, tocoff + shift, 'I')
+        pos += cmdsize
+    
+    # 插入新命令
+    new_data = data[:cmds_end] + cmd_data + data[cmds_end:]
+    data = new_data
+    w(16, sizeofcmds + shift)
+    w(4, ncmds + 1)
+    print(f"[B] Done! ncmds {ncmds} -> {ncmds+1}")
+
+with open(macho, 'wb') as f:
+    f.write(data)
+print("Written!")
+PYEOF
+        
         rm -rf "$APP/_CodeSignature" "$APP/embedded.mobileprovision"
         cd /tmp/x/out
         zip -qr /tmp/行信_带分享.ipa Payload/
@@ -45,7 +169,7 @@ jobs:
         name: XingxinShare.dylib
         path: XingxinShare.dylib
     
-    - name: Upload full IPA
+    - name: Upload IPA
       uses: actions/upload-artifact@v4
       with:
         name: 行信_带分享
