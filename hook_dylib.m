@@ -48,8 +48,10 @@ static void xingxin_ShowShareSheet(id vc, NSString *filePath) {
     
     if ([UIDevice currentDevice].userInterfaceIdiom == UIUserInterfaceIdiomPad) {
         avc.popoverPresentationController.sourceView = [vc view];
-        avc.popoverPresentationController.sourceRect = CGRectMake(CGRectGetMidX([vc view].bounds),
-            CGRectGetMidY([vc view].bounds), 0, 0);
+        CGRect bounds = [vc view].bounds;
+        avc.popoverPresentationController.sourceRect = CGRectMake(
+            bounds.origin.x + bounds.size.width / 2,
+            bounds.origin.y + bounds.size.height / 2, 0, 0);
     }
     
     [vc presentViewController:avc animated:YES completion:nil];
