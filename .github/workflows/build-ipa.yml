@@ -27,7 +27,12 @@ jobs:
         # 也尝试直接clang编译
         DYLIB=$(find . -name "*.dylib" | head -1)
         if [ -z "$DYLIB" ]; then
-          clang -target arm64-apple-ios14.0 -fobjc-arc -dynamiclib \
+          SDK_PATH=$(xcrun --sdk iphoneos --show-sdk-path 2>/dev/null)
+          if [ -z "$SDK_PATH" ]; then
+            SDK_PATH="/Applications/Xcode.app/Contents/Developer/Platforms/iPhoneOS.platform/Developer/SDKs/iPhoneOS.sdk"
+          fi
+          echo "SDK: $SDK_PATH"
+          clang -target arm64-apple-ios14.0 -isysroot "$SDK_PATH" -fobjc-arc -dynamiclib \
             -O2 -o XingxinShare.dylib hook_dylib.m \
             -lobjc -Wl,-dylib_install_name,@executable_path/XingxinShare.dylib \
             -Wl,-ios_version_min,14.0
