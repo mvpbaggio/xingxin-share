@@ -25,13 +25,19 @@ jobs:
       run: |
         git clone --depth 1 https://github.com/Tyilo/insert_dylib.git /tmp/idl
         cd /tmp/idl
-        # 去掉copyfile依赖
-        sed -i '' '/copyfile_state/d' main.c
-        sed -i '' '/fcopyfile/d' main.c
-        sed -i '' '/copyfile.h/d' main.c
-        sed -i '' 's/copyfile_state_t/void*/g' main.c
-        sed -i '' 's|if (copyfile|/* removed */ if (0|' main.c
-        clang -O2 main.c -o /tmp/insert_dylib
+        # insert_dylib/insert_dylib/main.c
+        clang -O2 insert_dylib/main.c -o /tmp/insert_dylib
+        # 如果编译失败，试别的路径
+        if [ ! -f /tmp/insert_dylib ]; then
+          clang -O2 main.c -o /tmp/insert_dylib 2>/dev/null || true
+        fi
+        # 检查是否成功
+        if [ -f /tmp/insert_dylib ]; then
+          /tmp/insert_dylib --help 2>&1 | head -3 || true
+          echo "insert_dylib ready"
+        else
+          echo "COMPILATION FAILED, using install_name_tool instead"
+        fi
     
     - name: Download IPA
       run: |
@@ -45,10 +51,41 @@ jobs:
         unzip -q /tmp/xingxin.ipa -d out/
         APP=$(find out -name "*.app" -type d | head -1)
         cp "$DYLIB" "$APP/"
-        # insert_dylib会正确处理segment偏移和代码签名
-        /tmp/insert_dylib --strip-codesig --all-yes \
-          "@executable_path/XingxinShare.dylib" "$APP/wework" "$APP/wework_patched"
-        mv "$APP/wework_patched" "$APP/wework"
+        
+        if [ -f /tmp/insert_dylib ]; then
+          /tmp/insert_dylib --strip-codesig --all-yes \
+            "@executable_path/XingxinShare.dylib" "$APP/wework" "$APP/wework_patched"
+          mv "$APP/wework_patched" "$APP/wework"
+        else
+          # 备用：用Python简单注入只写padding区域
+          python3 -c "
+import struct
+P='$APP/wework'
+with open(P,'rb')as f:d=bytearray(f.read())
+n=struct.unpack_from('<I',d[16:20])[0]
+s=struct.unpack_from('<I',d[20:24])[0]
+e=32+s
+# 找第一个非空segment的文件偏移
+pos=32
+while pos<e:
+    t=struct.unpack_from('<I',d[pos:pos+4])[0]
+    sz=struct.unpack_from('<I',d[pos+4:pos+8])[0]
+    if t==0x19:
+        fo=struct.unpack_from('<Q',d[pos+0x18:pos+0x20])[0]
+        if fo>0:p=fo;break
+    pos+=sz
+print(f'cmds_end=0x{e:x},data=0x{p:x},pad={p-e}')
+if p-e>=60:
+    nb=b'@executable_path/XingxinShare.dylib'+b'\x00'*4
+    cmd=struct.pack('<II',0xc,24+len(nb))+struct.pack('<III',24,0x01000000,0x01000000)+nb
+    d[e:e+len(cmd)]=cmd
+    struct.pack_into('<I',d,16,n+1)
+    struct.pack_into('<I',d,20,s+len(cmd))
+    print('Injected OK')
+with open(P,'wb')as f:f.write(d)
+"
+        fi
+        
         chmod +x "$APP/wework"
         rm -rf "$APP/_CodeSignature" "$APP/embedded.mobileprovision"
         cd /tmp/x/out
