@@ -2,10 +2,8 @@ name: Build Injected IPA
 
 on:
   workflow_dispatch:
-    inputs:
-      ipa_url:
-        description: '行信IPA下载链接'
-        required: false
+  push:
+    branches: [ main ]
 
 jobs:
   build:
@@ -24,27 +22,65 @@ jobs:
       run: |
         export THEOS=/tmp/theos
         export TARGET=iphone:17.0:14.0
-        make clean
-        make package
+        make clean || true
+        make package || true
+        # 也尝试直接clang编译
         DYLIB=$(find . -name "*.dylib" | head -1)
+        if [ -z "$DYLIB" ]; then
+          clang -target arm64-apple-ios14.0 -fobjc-arc -dynamiclib \
+            -O2 -o XingxinShare.dylib hook_dylib.m \
+            -lobjc -Wl,-dylib_install_name,@executable_path/XingxinShare.dylib \
+            -Wl,-ios_version_min,14.0
+          DYLIB=XingxinShare.dylib
+        fi
         echo "DYLIB_PATH=$(pwd)/$DYLIB" >> $GITHUB_ENV
     
     - name: Download IPA
       run: |
-        mkdir -p ipa
-        if [ -n "${{ github.event.inputs.ipa_url }}" ]; then
-          curl -L "${{ github.event.inputs.ipa_url }}" -o ipa/app.ipa
-        else
-          # 从仓库获取
-          find . -name "*.ipa" -exec mv {} ipa/app.ipa \;
-        fi
+        curl -L "https://github.com/mvpbaggio/xingxin-share/releases/download/v1/xingxin.ipa" \
+          -o /tmp/xingxin.ipa -w "HTTP %{http_code}, Size: %{size_download}\n"
     
-    - name: Inject
+    - name: Inject into IPA
       run: |
-        bash inject.sh ipa/app.ipa
+        # 解压IPA
+        mkdir -p /tmp/extract
+        cd /tmp/extract
+        unzip -q /tmp/xingxin.ipa -d extracted/
+        APP_PATH=$(find extracted -name "*.app" -type d | head -1)
+        echo "App path: $APP_PATH"
+        
+        # 找主二进制
+        MACHO=$(find "$APP_PATH" -maxdepth 1 -type f ! -name ".*" ! -name "*.plist" ! -name "*.png" ! -name "*.jpg" | head -1)
+        echo "Binary: $(basename $MACHO)"
+        
+        # 复制dylib
+        cp "$DYLIB_PATH" "$APP_PATH/"
+        
+        # 注入dylib
+        # 先用insert_dylib，如果没有则用Python脚本
+        if which insert_dylib >/dev/null 2>&1; then
+          insert_dylib --strip-codesig --all-yes "@executable_path/$(basename $DYLIB_PATH)" "$MACHO" "${MACHO}_patched"
+          mv "${MACHO}_patched" "$MACHO"
+        else
+          # 编译insert_dylib
+          git clone --depth 1 https://github.com/Tyilo/insert_dylib.git /tmp/idl
+          clang -O2 /tmp/idl/insert_dylib/main.c -o /tmp/insert_dylib -lcopyfile
+          /tmp/insert_dylib --strip-codesig --all-yes "@executable_path/$(basename $DYLIB_PATH)" "$MACHO" "${MACHO}_patched"
+          mv "${MACHO}_patched" "$MACHO"
+        fi
+        chmod +x "$MACHO"
+        
+        # 移除签名
+        rm -rf "$APP_PATH/_CodeSignature"
+        rm -f "$APP_PATH/embedded.mobileprovision"
+        rm -f "$APP_PATH/archived-expanded-entitlements.xcent"
+        
+        # 重新打包
+        cd /tmp/extract/extracted
+        zip -qr "/tmp/行信_带分享.ipa" Payload/
     
     - name: Upload IPA
       uses: actions/upload-artifact@v4
       with:
-        name: XingxinWithShare
-        path: XingxinWithShare.ipa
+        name: 行信_带分享
+        path: /tmp/行信_带分享.ipa
