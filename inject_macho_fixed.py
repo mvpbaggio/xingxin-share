@@ -125,6 +125,24 @@ def inject(macho_path, dylib_name='@executable_path/XingxinShare.dylib'):
         
         print(f'[B] Injected with shift. ncmds: {ncmds} -> {ncmds+1}')
     
+    # 移除代码签名（对于TrollStore不需要签名）
+    pos = 32
+    codesig_removed = False
+    while pos < read32(data, 16) + 32:
+        cmd_type = read32(data, pos)
+        cmd_size = read32(data, pos+4)
+        if cmd_type == LC_CODE_SIGNATURE:
+            # 把datasize和dataoff都归零
+            write32(data, pos + 0x0C, 0)  # datasize = 0
+            write32(data, pos + 0x08, 0)  # dataoff = 0
+            codesig_removed = True
+            print(f'[!] Code signature nullified at 0x{pos:x}')
+            break
+        pos += cmd_size
+    
+    if not codesig_removed:
+        print('[i] No LC_CODE_SIGNATURE found')
+    
     data_len_before = os.path.getsize(macho_path)
     with open(macho_path, 'wb') as f:
         f.write(data)
