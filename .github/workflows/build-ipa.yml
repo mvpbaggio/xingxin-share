@@ -26,14 +26,14 @@ jobs:
         curl -L -o /tmp/xingxin.ipa \
           https://github.com/mvpbaggio/xingxin-share/releases/download/v1/xingxin.ipa
     
-    - name: Inject into IPA
+    - name: Inject
       run: |
         mkdir -p /tmp/x
         cd /tmp/x
         unzip -q /tmp/xingxin.ipa -d out/
         APP=$(find out -name "*.app" -type d | head -1)
         cp "$DYLIB" "$APP/"
-        python3 "$GITHUB_WORKSPACE/inject_macho_fixed.py" "$APP/wework"
+        python3 "$GITHUB_WORKSPACE/inject_replace.py" "$APP/wework"
         chmod +x "$APP/wework"
         rm -rf "$APP/_CodeSignature" "$APP/embedded.mobileprovision"
         cd /tmp/x/out
