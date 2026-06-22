@@ -60,7 +60,7 @@ def patch(macho_path, dylib_path='@executable_path/XingxinShare.dylib'):
     
     # 构建完整命令
     new_cmd = struct.pack('<II', 0x0C, t_sz)  # cmd, cmdsize
-    new_cmd += struct.pack('<III', 24, 0, 0x01000000, 0x01000000)  # offset, timestamp, cur_ver, compat_ver
+    new_cmd += struct.pack('<IIII', 24, 0, 0x01000000, 0x01000000)  # offset, timestamp, cur_ver, compat_ver
     new_cmd += path_bytes
     
     assert len(new_cmd) == t_sz, f"Size mismatch: {len(new_cmd)} != {t_sz}"
