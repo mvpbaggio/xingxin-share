@@ -43,25 +43,65 @@ jobs:
         APP_PATH=$(find extracted -name "*.app" -type d | head -1)
         echo "App path: $APP_PATH"
         
-        # 找主二进制
-        MACHO=$(find "$APP_PATH" -maxdepth 1 -type f ! -name ".*" ! -name "*.plist" ! -name "*.png" ! -name "*.jpg" | head -1)
-        echo "Binary: $(basename $MACHO)"
+        # 正确找到主二进制（Mach-O格式，不是js/png等）
+        for f in "$APP_PATH"/*; do
+          if [ -f "$f" ]; then
+            FTYPE=$(file "$f" 2>/dev/null)
+            if echo "$FTYPE" | grep -q "Mach-O.*executable"; then
+              MACHO="$f"
+              echo "Binary: $(basename $MACHO) (Mach-O)"
+              break
+            fi
+          fi
+        done
         
         # 复制dylib
         cp "$DYLIB_PATH" "$APP_PATH/"
         
-        # 注入dylib
-        # 先用insert_dylib，如果没有则用Python脚本
-        if which insert_dylib >/dev/null 2>&1; then
-          insert_dylib --strip-codesig --all-yes "@executable_path/$(basename $DYLIB_PATH)" "$MACHO" "${MACHO}_patched"
-          mv "${MACHO}_patched" "$MACHO"
-        else
-          # 编译insert_dylib
-          git clone --depth 1 https://github.com/Tyilo/insert_dylib.git /tmp/idl
-          clang -O2 /tmp/idl/insert_dylib/main.c -o /tmp/insert_dylib -lcopyfile
-          /tmp/insert_dylib --strip-codesig --all-yes "@executable_path/$(basename $DYLIB_PATH)" "$MACHO" "${MACHO}_patched"
-          mv "${MACHO}_patched" "$MACHO"
-        fi
+        export MACHO_PATH="$MACHO"
+        
+        # 使用Python脚本注入
+        python3 -c "
+import struct, os
+MH_MAGIC_64 = 0xfeedfacf
+LC_LOAD_DYLIB = 0xc
+
+macho_path = os.environ.get('MACHO_PATH', '')
+if not macho_path or not os.path.exists(macho_path):
+    print('ERROR: MACHO_PATH not set')
+    exit(1)
+
+dylib_name = b'@executable_path/XingxinShare.dylib\x00'
+while len(dylib_name) % 4 != 0:
+    dylib_name += b'\x00'
+
+with open(macho_path, 'rb') as f:
+    data = bytearray(f.read())
+
+magic = struct.unpack_from('<I', data[0:4])[0]
+endian = '<' if magic == MH_MAGIC_64 else '>'
+(_, _, _, _, ncmds, sizeofcmds, _, _) = struct.unpack_from(f'{endian}IIIIIIII', data[0:32])
+print(f'ncmds: {ncmds}, sizeofcmds: {sizeofcmds}')
+
+cmd_size = 24 + len(dylib_name)
+dylib_cmd = struct.pack(f'{endian}II', LC_LOAD_DYLIB, cmd_size)
+dylib_cmd += struct.pack(f'{endian}III', 24, 0x01000000, 0x01000000)
+dylib_cmd += dylib_name
+
+cmds_end = 32 + sizeofcmds
+new_data = bytearray(data[:cmds_end]) + dylib_cmd + data[cmds_end:]
+
+vals = list(struct.unpack_from(f'{endian}IIIIIIII', data[0:32]))
+vals[4] = ncmds + 1
+vals[5] = sizeofcmds + cmd_size
+new_header = struct.pack(f'{endian}IIIIIIII', *vals)
+new_data[0:32] = new_header
+
+with open(macho_path, 'wb') as f:
+    f.write(new_data)
+
+print(f'Done! ncmds: {ncmds} -> {ncmds + 1}')
+"
         chmod +x "$MACHO"
         
         # 移除签名
