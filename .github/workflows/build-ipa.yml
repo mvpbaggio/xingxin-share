@@ -32,7 +32,7 @@ jobs:
         cd /tmp/x
         unzip -q /tmp/xingxin.ipa -d out/
         APP=$(find out -name "*.app" -type d | head -1)
-        BIN=$(find "$APP" -maxdepth 1 -type f | head -1)
+        BIN="$APP/wework"
         cp $DYLIB_PATH "$APP/"
         python3 $GITHUB_WORKSPACE/inject_macho.py "$BIN"
         rm -rf "$APP/_CodeSignature" "$APP/embedded.mobileprovision"
