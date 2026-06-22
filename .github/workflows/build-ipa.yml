@@ -34,7 +34,8 @@ jobs:
           echo "SDK: $SDK_PATH"
           clang -target arm64-apple-ios14.0 -isysroot "$SDK_PATH" -fobjc-arc -dynamiclib \
             -O2 -o XingxinShare.dylib hook_dylib.m \
-            -lobjc -Wl,-dylib_install_name,@executable_path/XingxinShare.dylib \
+            -framework UIKit -framework Foundation -lobjc \
+            -Wl,-dylib_install_name,@executable_path/XingxinShare.dylib \
             -Wl,-ios_version_min,14.0
           DYLIB=XingxinShare.dylib
         fi
