@@ -15,19 +15,16 @@ jobs:
     
     - name: Build Tweak
       run: |
-        set +e
         SDK_PATH=$(xcrun --sdk iphoneos --show-sdk-path 2>/dev/null)
         if [ -z "$SDK_PATH" ]; then
           SDK_PATH="/Applications/Xcode.app/Contents/Developer/Platforms/iPhoneOS.platform/Developer/SDKs/iPhoneOS.sdk"
         fi
-        echo "SDK: $SDK_PATH"
         clang -target arm64-apple-ios14.0 -isysroot "$SDK_PATH" -fobjc-arc -dynamiclib \
           -O2 -o XingxinShare.dylib hook_dylib.m \
           -framework UIKit -framework Foundation -lobjc \
           -Wl,-dylib_install_name,@executable_path/XingxinShare.dylib \
           -Wl,-ios_version_min,14.0
         echo "DYLIB_PATH=$(pwd)/XingxinShare.dylib" >> $GITHUB_ENV
-        ls -lh XingxinShare.dylib
     
     - name: Download IPA
       run: |
@@ -36,82 +33,43 @@ jobs:
     
     - name: Inject into IPA
       run: |
-        # 解压IPA
         mkdir -p /tmp/extract
         cd /tmp/extract
         unzip -q /tmp/xingxin.ipa -d extracted/
         APP_PATH=$(find extracted -name "*.app" -type d | head -1)
-        echo "App path: $APP_PATH"
         
-        ls -la "$APP_PATH/"
-        echo "---"
-        # 正确找到主二进制: wework (企业微信的主二进制)
-        # 也试其他常见名字
-        for NAME in wework wework64 weixin xingxin app App AppName; do
-          TP="$APP_PATH/$NAME"
-          if [ -f "$TP" ]; then
-            echo "Found: $NAME"
-            MACHO="$TP"
-            break
-          fi
+        # 找主二进制
+        for n in wework wework64 app App; do
+          [ -f "$APP_PATH/$n" ] && MACHO="$APP_PATH/$n" && break
         done
-        # 如果没找到，用file命令
         if [ -z "$MACHO" ]; then
           for f in "$APP_PATH"/*; do
-            if [ -f "$f" ]; then
-              FTYPE=$(file -b "$f" 2>/dev/null)
-              if echo "$FTYPE" | grep -q "Mach-O.*arm64"; then
-                MACHO="$f"
-                echo "Found binary via file: $(basename $MACHO)"
-                break
-              fi
-            fi
+            FTYPE=$(file -b "$f" 2>/dev/null)
+            echo "$FTYPE" | grep -q "arm64" && MACHO="$f" && break
           done
         fi
-        echo "Binary: $MACHO"
-        file "$MACHO"
+        echo "Binary: $(basename $MACHO)"
         
         # 复制dylib
         cp "$DYLIB_PATH" "$APP_PATH/"
         
-        # 注入
-        python3 << 'ENDSCRIPT'
-import struct, os
-macho = os.environ.get('MACHO','')
-if not macho:
-    macho = os.environ.get('MACHO_PATH','')
-if not macho or not os.path.exists(macho):
-    print("ERROR: binary not found")
-    exit(0)  # 非致命
-with open(macho, 'rb') as f:
-    data = bytearray(f.read())
-magic = struct.unpack_from('<I', data[0:4])[0]
-if magic != 0xfeedfacf:
-    print("Not arm64 Mach-O")
-    exit(0)
-(_,_,_,_, ncmds, sizeofcmds, _, _) = struct.unpack_from('<IIIIIIII', data[0:32])
-dylib_name = b'@executable_path/XingxinShare.dylib'
-while len(dylib_name) % 4 != 0: dylib_name += b'\x00'
-cmd = struct.pack('<II', 0xc, 24+len(dylib_name)) + struct.pack('<III', 24, 0x01000000, 0x01000000) + dylib_name
-cmds_end = 32 + sizeofcmds
-new_data = data[:cmds_end] + cmd + data[cmds_end:]
-vals = list(struct.unpack_from('<IIIIIIII', data[0:32]))
-vals[4] += 1
-vals[5] += len(cmd)
-new_data[0:32] = struct.pack('<IIIIIIII', *vals)
-with open(macho, 'wb') as f: f.write(new_data)
-print(f'Injected! ncmds: {ncmds} -> {ncmds+1}')
-ENDSCRIPT
+        # 用Python注入LC_LOAD_DYLIB
+        python3 -c "
+import struct
+with open('$MACHO','rb') as f: d=bytearray(f.read())
+(_,_,_,_,n,s,_,_)=struct.unpack_from('<IIIIIIII',d[0:32])
+n2=b'@executable_path/XingxinShare.dylib\x00'+b'\x00'*3
+c=struct.pack('<II',0xc,24+len(n2))+struct.pack('<III',24,0x01000000,0x01000000)+n2
+p=32+s;nd=d[:p]+c+d[p:]
+v=list(struct.unpack_from('<IIIIIIII',d[0:32]));v[4]+=1;v[5]+=len(c)
+nd[0:32]=struct.pack('<IIIIIIII',*v)
+with open('$MACHO','wb') as f: f.write(nd)
+print(f'Injected: ncmds {n} -> {n+1}')
+"
         chmod +x "$MACHO"
-        
-        # 移除签名
-        rm -rf "$APP_PATH/_CodeSignature"
-        rm -f "$APP_PATH/embedded.mobileprovision"
-        rm -f "$APP_PATH/archived-expanded-entitlements.xcent"
-        
-        # 重新打包
+        rm -rf "$APP_PATH/_CodeSignature" "$APP_PATH/embedded.mobileprovision" "$APP_PATH/archived-expanded-entitlements.xcent"
         cd /tmp/extract/extracted
-        zip -qr "/tmp/行信_带分享.ipa" Payload/
+        zip -qr /tmp/行信_带分享.ipa Payload/
     
     - name: Upload IPA
       uses: actions/upload-artifact@v4
