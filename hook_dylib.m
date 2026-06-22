@@ -1,198 +1,139 @@
-// 行信分享导出 Tweak
-// 编译方式: clang -target arm64-apple-ios14.0 -fobjc-arc -dynamiclib -o XingxinShare.dylib hook_dylib.m -lobjc
+// 行信分享导出 Tweak (兼容ARM64 ARC)
+// 编译: clang -target arm64-apple-ios14.0 -fobjc-arc -dynamiclib -o XingxinShare.dylib hook_dylib.m
 
+#import <Foundation/Foundation.h>
+#import <UIKit/UIKit.h>
 #import <objc/runtime.h>
-#import <objc/message.h>
 
-// 函数指针声明
-static id (*$objc_msgSend)(id, SEL, ...) = (id (*)(id, SEL, ...))objc_msgSend;
-static Class (*$objc_getClass)(const char *) = objc_getClass;
-static SEL (*$sel_registerName)(const char *) = sel_registerName;
-static Method (*$class_getInstanceMethod)(Class, SEL) = class_getInstanceMethod;
-static IMP (*$method_getImplementation)(Method) = method_getImplementation;
-static void (*$method_setImplementation)(Method, IMP) = method_setImplementation;
-static BOOL (*$class_addMethod)(Class, SEL, IMP, const char *) = class_addMethod;
-static const void *kShareBtnTag = (const void *)0x927;
+#pragma mark - 辅助函数
 
-#define CLS(name) $objc_getClass(name)
-#define SEL(name) $sel_registerName(name)
-#define MSG(target, sel) $objc_msgSend((id)(target), sel)
-#define MSG1(target, sel, a) $objc_msgSend((id)(target), sel, (id)(a))
-#define MSG2(target, sel, a, b) $objc_msgSend((id)(target), sel, (id)(a), (id)(b))
-#define MSG3(target, sel, a, b, c) $objc_msgSend((id)(target), sel, (id)(a), (id)(b), (id)(c))
-#define MSG4(target, sel, a, b, c, d) $objc_msgSend((id)(target), sel, (id)(a), (id)(b), (id)(c), (id)(d))
-#define INT(n) ((id)(uintptr_t)(n))
-
-static IMP orig_viewDidAppear = NULL;
-
-// 查找文件路径
-static id findFilePath(id vc) {
-    const char *propNames[] = {
-        "filePath", "fileUrl", "fileURL", "documentURL",
-        "localFilePath", "downloadPath", "dataPath",
-        "url", "URL", "path", "filePathStr",
-        "fileId", "currentUrl", "previewUrl",
-        NULL
-    };
+static NSString *xingxin_FindFilePath(id vc) {
+    // 常见文件路径属性名
+    NSArray *props = @[@"filePath", @"fileUrl", @"fileURL", @"documentURL", 
+                       @"localFilePath", @"downloadPath", @"dataPath",
+                       @"url", @"URL", @"path", @"filePathStr"];
     
-    for (int i = 0; propNames[i]; i++) {
-        SEL sel = $sel_registerName(propNames[i]);
-        if ($objc_msgSend(vc, $sel_registerName("respondsToSelector:"), (SEL)sel)) {
-            id val = ((id (*)(id, SEL))objc_msgSend)(vc, sel);
-            if (val) {
-                // 检查是否是NSString
-                id isStr = ((id (*)(id, SEL))objc_msgSend)(CLS("NSString"), SEL("class"));
-                if (((id (*)(id, SEL))objc_msgSend)(val, SEL("isKindOfClass:"), isStr)) {
-                    id hasPrefix = ((id (*)(id, SEL, id))objc_msgSend)(val, SEL("hasPrefix:"), (id)@"/");
-                    if (hasPrefix == (id)1) return val;
-                }
+    for (NSString *prop in props) {
+        @try {
+            id val = [vc valueForKey:prop];
+            if ([val isKindOfClass:[NSString class]] && [val length] > 5 && [val hasPrefix:@"/"]) {
+                return val;
             }
-        }
+            if ([val isKindOfClass:[NSURL class]]) {
+                NSString *p = [(NSURL *)val path];
+                if (p.length > 5) return p;
+            }
+        } @catch (NSException *e) {}
     }
     
-    // 尝试取model/fileItem属性
-    SEL modelSels[] = {SEL("model"), SEL("fileItem"), SEL("fileInfo"), SEL("dataItem")};
-    for (int i = 0; i < 4; i++) {
-        if (((id (*)(id, SEL))objc_msgSend)(vc, SEL("respondsToSelector:"), modelSels[i])) {
-            id model = ((id (*)(id, SEL))objc_msgSend)(vc, modelSels[i]);
+    // 尝试model对象
+    NSArray *modelSels = @[@"model", @"fileItem", @"fileInfo", @"dataItem"];
+    for (NSString *sel in modelSels) {
+        if ([vc respondsToSelector:NSSelectorFromString(sel)]) {
+            id model = [vc valueForKey:sel];
             if (model) {
-                id result = findFilePath(model);
-                if (result) return result;
+                NSString *found = xingxin_FindFilePath(model);
+                if (found) return found;
             }
         }
     }
     
-    return NULL;
+    return nil;
 }
 
-// 分享按钮被点击
-static void shareTapped(id self, SEL _cmd, id sender) {
-    // 找顶层VC
-    id app = ((id (*)(Class, SEL))objc_msgSend)(CLS("UIApplication"), SEL("sharedApplication"));
-    id keyWindow = ((id (*)(id, SEL))objc_msgSend)(app, SEL("keyWindow"));
-    id rootVC = ((id (*)(id, SEL))objc_msgSend)(keyWindow, SEL("rootViewController"));
+static void xingxin_ShowShareSheet(id vc, NSString *filePath) {
+    NSURL *fileURL = [NSURL fileURLWithPath:filePath];
+    UIActivityViewController *avc = [[UIActivityViewController alloc]
+        initWithActivityItems:@[fileURL] applicationActivities:nil];
     
-    id topVC = rootVC;
-    while (1) {
-        id presented = ((id (*)(id, SEL))objc_msgSend)(topVC, SEL("presentedViewController"));
-        if (!presented) break;
-        topVC = presented;
+    if ([UIDevice currentDevice].userInterfaceIdiom == UIUserInterfaceIdiomPad) {
+        avc.popoverPresentationController.sourceView = [vc view];
+        avc.popoverPresentationController.sourceRect = CGRectMake(CGRectGetMidX([vc view].bounds),
+            CGRectGetMidY([vc view].bounds), 0, 0);
     }
     
-    // 如果是UINavigationController
-    id navClass = CLS("UINavigationController");
-    if (((id (*)(id, SEL, id))objc_msgSend)(topVC, SEL("isKindOfClass:"), navClass)) {
-        topVC = ((id (*)(id, SEL))objc_msgSend)(topVC, SEL("topViewController"));
+    [vc presentViewController:avc animated:YES completion:nil];
+}
+
+static void xingxin_AddShareButton(UIViewController *vc) {
+    if (!vc.navigationItem) return;
+    
+    // 检查是否已有
+    for (UIBarButtonItem *item in vc.navigationItem.rightBarButtonItems) {
+        if (item.tag == 927) return;
     }
     
-    // 找文件路径
-    id filePath = findFilePath(topVC);
-    
-    if (filePath) {
-        // NSURL *fileURL = [NSURL fileURLWithPath:filePath];
-        id fileURL = ((id (*)(Class, SEL, id))objc_msgSend)(CLS("NSURL"), SEL("fileURLWithPath:"), filePath);
-        
-        // UIActivityViewController
-        id items = ((id (*)(Class, SEL, id))objc_msgSend)(CLS("NSArray"), SEL("arrayWithObjects:"), fileURL, NULL);
-        id activityVC = ((id (*)(id, SEL))objc_msgSend)(CLS("UIActivityViewController"), SEL("alloc"));
-        activityVC = ((id (*)(id, SEL, id, id))objc_msgSend)(activityVC, SEL("initWithActivityItems:applicationActivities:"), items, NULL);
-        
-        // iPad popover
-        id device = ((id (*)(Class, SEL))objc_msgSend)(CLS("UIDevice"), SEL("currentDevice"));
-        id idiom = ((id (*)(id, SEL))objc_msgSend)(device, SEL("userInterfaceIdiom"));
-        if (idiom == INT(1)) { // UIUserInterfaceIdiomPad
-            id popover = ((id (*)(id, SEL))objc_msgSend)(activityVC, SEL("popoverPresentationController"));
-            id view = ((id (*)(id, SEL))objc_msgSend)(topVC, SEL("view"));
-            ((void (*)(id, SEL, id))objc_msgSend)(popover, SEL("setSourceView:"), view);
-            id bounds = ((id (*)(id, SEL))objc_msgSend)(view, SEL("bounds"));
-            double midX = ((double (*)(id, SEL))objc_msgSend)(bounds, SEL("size")) / 2;
-            // 简化为居中
-            ((void (*)(id, SEL, CGRect))objc_msgSend)(popover, SEL("setSourceRect:"), 
-                CGRectMake(200, 200, 0, 0));
-        }
-        
-        ((void (*)(id, SEL, id, BOOL, id))objc_msgSend)(topVC, SEL("presentViewController:animated:completion:"), activityVC, 1, NULL);
+    UIImage *img = [UIImage systemImageNamed:@"square.and.arrow.up"];
+    UIBarButtonItem *btn;
+    if (img) {
+        btn = [[UIBarButtonItem alloc] initWithImage:img style:UIBarButtonItemStylePlain
+                                              target:nil action:@selector(xingxin_shareTapped:)];
     } else {
-        id alert = ((id (*)(id, SEL))objc_msgSend)(CLS("UIAlertController"), SEL("alloc"));
-        alert = ((id (*)(id, SEL, id, id, int))objc_msgSend)(alert, SEL("initWithTitle:message:preferredStyle:"), @"提示", @"未找到文件路径，请先在行信中打开文件", 1);
-        id okAction = ((id (*)(id, SEL))objc_msgSend)(CLS("UIAlertAction"), SEL("alloc"));
-        okAction = ((id (*)(id, SEL, id, int, id))objc_msgSend)(okAction, SEL("initWithTitle:style:handler:"), @"确定", 0, NULL);
-        ((void (*)(id, SEL, id))objc_msgSend)(alert, SEL("addAction:"), okAction);
-        ((void (*)(id, SEL, id, BOOL, id))objc_msgSend)(topVC, SEL("presentViewController:animated:completion:"), alert, 1, NULL);
+        btn = [[UIBarButtonItem alloc] initWithTitle:@"分享" style:UIBarButtonItemStylePlain
+                                              target:nil action:@selector(xingxin_shareTapped:)];
+    }
+    btn.tag = 927;
+    
+    NSMutableArray *items = [NSMutableArray arrayWithArray:vc.navigationItem.rightBarButtonItems];
+    [items insertObject:btn atIndex:0];
+    vc.navigationItem.rightBarButtonItems = items;
+}
+
+// Hook: viewDidAppear
+static void (*orig_viewDidAppear)(id, SEL, BOOL);
+static void hooked_viewDidAppear(UIViewController *self, SEL _cmd, BOOL animated) {
+    ((void (*)(UIViewController *, SEL, BOOL))orig_viewDidAppear)(self, _cmd, animated);
+    
+    NSString *cn = NSStringFromClass(self.class);
+    NSArray *targets = @[@"EntDisk", @"FilePreview", @"FileAttachment",
+                          @"QLPreview", @"DocumentPreview", @"DiskPreview",
+                          @"WWKFile", @"WWKEnt", @"WWKDisk",
+                          @"TOMainPage", @"TOWebView", @"TOTemplate",
+                          @"FMOCRDocument", @"PreviewFile", @"FileBrowser"];
+    
+    for (NSString *t in targets) {
+        if ([cn containsString:t]) {
+            xingxin_AddShareButton(self);
+            break;
+        }
     }
 }
 
-// Hook后的viewDidAppear
-static void hooked_viewDidAppear(id self, SEL _cmd, BOOL animated) {
-    ((void (*)(id, SEL, BOOL))orig_viewDidAppear)(self, _cmd, animated);
+// 分享按钮回调
+static void xingxin_shareTapped(id self, SEL _cmd, id sender) {
+    // 找顶层VC
+    UIWindow *keyWindow = UIApplication.sharedApplication.keyWindow;
+    UIViewController *topVC = keyWindow.rootViewController;
+    while (topVC.presentedViewController) {
+        topVC = topVC.presentedViewController;
+    }
+    if ([topVC isKindOfClass:UINavigationController.class]) {
+        topVC = [(UINavigationController *)topVC topViewController];
+    }
     
-    // 检查类名
-    id className = ((id (*)(id, SEL))objc_msgSend)(self, SEL("description"));
-    if (className) {
-        const char *cn = ((const char *(*)(id, SEL))objc_msgSend)(className, SEL("UTF8String"));
-        if (cn) {
-            const char *targets[] = {
-                "EntDisk", "FilePreview", "FileAttachment",
-                "QLPreview", "DocumentPreview", "DiskPreview",
-                "WWKFile", "WWKEnt", "WWKDisk",
-                "TOMainPage", "TOWebView", "TOTemplate",
-                "FMOCRDocument", "PreviewFile", "FileBrowser",
-                NULL
-            };
-            
-            for (int i = 0; targets[i]; i++) {
-                if (strstr(cn, targets[i])) {
-                    // 添加分享按钮
-                    id navItem = ((id (*)(id, SEL))objc_msgSend)(self, SEL("navigationItem"));
-                    if (navItem) {
-                        id rightBtns = ((id (*)(id, SEL))objc_msgSend)(navItem, SEL("rightBarButtonItems"));
-                        if (rightBtns) {
-                            id enumerator = ((id (*)(id, SEL))objc_msgSend)(rightBtns, SEL("objectEnumerator"));
-                            id item;
-                            while ((item = ((id (*)(id, SEL))objc_msgSend)(enumerator, SEL("nextObject")))) {
-                                id tag = ((id (*)(id, SEL))objc_msgSend)(item, SEL("tag"));
-                                if (tag == INT(0x927)) return; // 已添加
-                            }
-                        }
-                        
-                        // 创建分享按钮
-                        id shareImg = ((id (*)(Class, SEL, id))objc_msgSend)(CLS("UIImage"), SEL("systemImageNamed:"), @"square.and.arrow.up");
-                        id btn;
-                        if (shareImg) {
-                            btn = ((id (*)(id, SEL))objc_msgSend)(CLS("UIBarButtonItem"), SEL("alloc"));
-                            btn = ((id (*)(id, SEL, id, int, id, SEL))objc_msgSend)(btn, 
-                                SEL("initWithImage:style:target:action:"),
-                                shareImg, 0, self, SEL("_xingxin_shareTapped:"));
-                        } else {
-                            btn = ((id (*)(id, SEL))objc_msgSend)(CLS("UIBarButtonItem"), SEL("alloc"));
-                            btn = ((id (*)(id, SEL, id, int, id, SEL))objc_msgSend)(btn,
-                                SEL("initWithTitle:style:target:action:"),
-                                @"分享", 0, self, SEL("_xingxin_shareTapped:"));
-                        }
-                        
-                        ((void (*)(id, SEL, id))objc_msgSend)(btn, SEL("setTag:"), INT(0x927));
-                        id items = ((id (*)(id, SEL, id))objc_msgSend)(rightBtns, SEL("arrayByAddingObject:"), btn);
-                        ((void (*)(id, SEL, id))objc_msgSend)(navItem, SEL("setRightBarButtonItems:"), items);
-                    }
-                    break;
-                }
-            }
-        }
+    NSString *filePath = xingxin_FindFilePath(topVC);
+    if (filePath) {
+        xingxin_ShowShareSheet(topVC, filePath);
+    } else {
+        UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"提示"
+            message:@"未找到文件路径\n请先在行信中打开文件再试" preferredStyle:UIAlertControllerStyleAlert];
+        [alert addAction:[UIAlertAction actionWithTitle:@"确定" style:UIAlertActionStyleDefault handler:nil]];
+        [topVC presentViewController:alert animated:YES completion:nil];
     }
 }
 
 __attribute__((constructor))
 static void load() {
-    // 添加_ xingxin_shareTapped: 方法
-    Class vcClass = CLS("UIViewController");
-    if (vcClass) {
-        $class_addMethod(vcClass, SEL("_xingxin_shareTapped:"), (IMP)shareTapped, "v@:@");
-        
-        // Hook viewDidAppear:
-        Method m = $class_getInstanceMethod(vcClass, SEL("viewDidAppear:"));
-        if (m) {
-            orig_viewDidAppear = $method_getImplementation(m);
-            $method_setImplementation(m, (IMP)hooked_viewDidAppear);
-        }
+    // Register the shareTapped method on UIViewController
+    Class vcClass = UIViewController.class;
+    class_addMethod(vcClass, @selector(xingxin_shareTapped:), (IMP)xingxin_shareTapped, "v@:@");
+    
+    // Hook viewDidAppear:
+    Method m = class_getInstanceMethod(vcClass, @selector(viewDidAppear:));
+    if (m) {
+        orig_viewDidAppear = (void (*)(id, SEL, BOOL))method_getImplementation(m);
+        method_setImplementation(m, (IMP)hooked_viewDidAppear);
     }
+    
+    NSLog(@"[行信分享] Tweak loaded");
 }
