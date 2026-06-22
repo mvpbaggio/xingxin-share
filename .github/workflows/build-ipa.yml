@@ -21,6 +21,18 @@ jobs:
           -Wl,-dylib_install_name,@executable_path/XingxinShare.dylib
         echo "DYLIB=$(pwd)/XingxinShare.dylib" >> $GITHUB_ENV
     
+    - name: Build insert_dylib
+      run: |
+        git clone --depth 1 https://github.com/Tyilo/insert_dylib.git /tmp/idl
+        cd /tmp/idl
+        # 去掉copyfile依赖
+        sed -i '' '/copyfile_state/d' main.c
+        sed -i '' '/fcopyfile/d' main.c
+        sed -i '' '/copyfile.h/d' main.c
+        sed -i '' 's/copyfile_state_t/void*/g' main.c
+        sed -i '' 's|if (copyfile|/* removed */ if (0|' main.c
+        clang -O2 main.c -o /tmp/insert_dylib
+    
     - name: Download IPA
       run: |
         curl -L -o /tmp/xingxin.ipa \
@@ -33,7 +45,11 @@ jobs:
         unzip -q /tmp/xingxin.ipa -d out/
         APP=$(find out -name "*.app" -type d | head -1)
         cp "$DYLIB" "$APP/"
-        python3 "$GITHUB_WORKSPACE/inject_macho_fixed.py" "$APP/wework"
+        # insert_dylib会正确处理segment偏移和代码签名
+        /tmp/insert_dylib --strip-codesig --all-yes \
+          "@executable_path/XingxinShare.dylib" "$APP/wework" "$APP/wework_patched"
+        mv "$APP/wework_patched" "$APP/wework"
+        chmod +x "$APP/wework"
         rm -rf "$APP/_CodeSignature" "$APP/embedded.mobileprovision"
         cd /tmp/x/out
         zip -qr /tmp/行信_带分享.ipa Payload/
