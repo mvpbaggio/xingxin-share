@@ -39,7 +39,13 @@ jobs:
         cd /tmp/x/out
         zip -qr /tmp/行信_带分享.ipa Payload/
     
-    - name: Upload
+    - name: Upload dylib
+      uses: actions/upload-artifact@v4
+      with:
+        name: XingxinShare.dylib
+        path: XingxinShare.dylib
+    
+    - name: Upload full IPA
       uses: actions/upload-artifact@v4
       with:
         name: 行信_带分享
