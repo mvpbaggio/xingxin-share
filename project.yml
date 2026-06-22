@@ -1,0 +1,6 @@
+# 一键构建说明：
+# 1. 把脱壳IPA放到 ipa/ 目录
+# 2. 把这个项目推送到GitHub
+# 3. GitHub Actions自动编译注入
+# 4. 下载产出的XingxinWithShare.ipa
+# 5. 用TrollStore安装

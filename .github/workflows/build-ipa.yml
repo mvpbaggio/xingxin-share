@@ -1,0 +1,50 @@
+name: Build Injected IPA
+
+on:
+  workflow_dispatch:
+    inputs:
+      ipa_url:
+        description: '行信IPA下载链接'
+        required: false
+
+jobs:
+  build:
+    runs-on: macos-15
+    
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v4
+    
+    - name: Setup theos
+      run: |
+        git clone --recursive --depth 1 https://github.com/theos/theos.git /tmp/theos
+        echo "THEOS=/tmp/theos" >> $GITHUB_ENV
+    
+    - name: Build Tweak
+      run: |
+        export THEOS=/tmp/theos
+        export TARGET=iphone:17.0:14.0
+        make clean
+        make package
+        DYLIB=$(find . -name "*.dylib" | head -1)
+        echo "DYLIB_PATH=$(pwd)/$DYLIB" >> $GITHUB_ENV
+    
+    - name: Download IPA
+      run: |
+        mkdir -p ipa
+        if [ -n "${{ github.event.inputs.ipa_url }}" ]; then
+          curl -L "${{ github.event.inputs.ipa_url }}" -o ipa/app.ipa
+        else
+          # 从仓库获取
+          find . -name "*.ipa" -exec mv {} ipa/app.ipa \;
+        fi
+    
+    - name: Inject
+      run: |
+        bash inject.sh ipa/app.ipa
+    
+    - name: Upload IPA
+      uses: actions/upload-artifact@v4
+      with:
+        name: XingxinWithShare
+        path: XingxinWithShare.ipa

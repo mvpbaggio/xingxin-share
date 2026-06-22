@@ -1,0 +1,8 @@
+Package: com.xingxin.share
+Name: 行信分享导出
+Version: 1.0.0
+Description: 为行信+添加文件分享导出功能（添加分享按钮到文件预览页）
+Maintainer: 龙虾
+Author: 龙虾
+Section: Tweaks
+Depends: firmware (>= 14.0)
